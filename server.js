@@ -1,63 +1,127 @@
-// server.js
-import express from "express"
-const app = express();
+
+import http from 'http'
+import URL from 'url'
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// In-memory "DB"
+let items = []; // { id:string, name:string, price:number }
 
-let items = [];    
-let nextId = 1;
+// Helpers
+const json = (res, status, data) => {
+  const body = JSON.stringify(data);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  });
+  res.end(body);
+};
 
-// Create
-app.post("/items", (req, res) => {
-  const { name, price } = req.body || {};
-  if (!name || typeof price !== "number") {
-    return res.status(400).json({ error: "name (string) and price (number) required" });
+const readBody = (req) =>
+  new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => (data += chunk));
+    req.on("end", () => {
+      if (!data) return resolve({});
+      try {
+        resolve(JSON.parse(data));
+      } catch (e) {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+
+const server = http.createServer(async (req, res) => {
+  // Preflight for CORS
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+    return res.end();
   }
-  const item = { id: nextId++, name, price };
-  items.push(item);
-  res.status(201).json(item);
-});
 
-// Read all
-app.get("/items", (req, res) => {
-  res.json(items);
-});
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const pathname = url.pathname;
 
-// Read one
-app.get("/items/:id", (req, res) => {
-  const id = Number(req.params.id);
-  const item = items.find(i => i.id === id);
-  if (!item) return res.status(404).json({ error: "Not found" });
-  res.json(item);
-});
-
-// Update (replace)
-app.put("/items/:id", (req, res) => {
-  const id = Number(req.params.id);
-  const idx = items.findIndex(i => i.id === id);
-  if (idx === -1) return res.status(404).json({ error: "Not found" });
-
-  const { name, price } = req.body || {};
-  if (!name || typeof price !== "number") {
-    return res.status(400).json({ error: "name (string) and price (number) required" });
+  // Health
+  if (req.method === "GET" && pathname === "/") {
+    return json(res, 200, { ok: true, message: "Node (no Express) CRUD is running" });
   }
-  items[idx] = { id, name, price };
-  res.json(items[idx]);
+
+  // Routes: /items and /items/:id
+  const itemsMatch = pathname === "/items";
+  const itemIdMatch = /^\/items\/([^/]+)$/.exec(pathname);
+  const id = itemIdMatch ? itemIdMatch[1] : null;
+
+  try {
+    // CREATE
+    if (itemsMatch && req.method === "POST") {
+      const body = await readBody(req);
+      const { name, price } = body;
+      if (!name || typeof price !== "number") {
+        return json(res, 400, { error: "name (string) and price (number) required" });
+      }
+      const item = { id: cryptoRandomId(), name, price };
+      items.push(item);
+      return json(res, 201, item);
+    }
+
+    // READ ALL
+    if (itemsMatch && req.method === "GET") {
+      return json(res, 200, items);
+    }
+
+    // READ ONE
+    if (itemIdMatch && req.method === "GET") {
+      const item = items.find((i) => i.id === id);
+      return item ? json(res, 200, item) : json(res, 404, { error: "Not found" });
+    }
+
+    // UPDATE (replace)
+    if (itemIdMatch && req.method === "PUT") {
+      const idx = items.findIndex((i) => i.id === id);
+      if (idx === -1) return json(res, 404, { error: "Not found" });
+      const body = await readBody(req);
+      const { name, price } = body;
+      if (!name || typeof price !== "number") {
+        return json(res, 400, { error: "name (string) and price (number) required" });
+      }
+      items[idx] = { id, name, price };
+      return json(res, 200, items[idx]);
+    }
+
+    // DELETE
+    if (itemIdMatch && req.method === "DELETE") {
+      const before = items.length;
+      items = items.filter((i) => i.id !== id);
+      return before === items.length
+        ? json(res, 404, { error: "Not found" })
+        : json(res, 204, {});
+    }
+
+    // Fallback 404
+    json(res, 404, { error: "Route not found" });
+  } catch (err) {
+    json(res, 500, { error: err.message || "Internal Server Error" });
+  }
 });
 
-// Delete
-app.delete("/items/:id", (req, res) => {
-  const id = Number(req.params.id);
-  const before = items.length;
-  items = items.filter(i => i.id !== id);
-  if (items.length === before) return res.status(404).json({ error: "Not found" });
-  res.status(204).end();
+// Small UUID-ish id (works on Node <19)
+function cryptoRandomId(len = 12) {
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return out;
+}
+
+server.listen(PORT, () => {
+  console.log(`Server: http://localhost:${PORT}`);
 });
-
-// Basic health check
-app.get("/", (_req, res) => res.send("Node CRUD API is running."));
-
-app.listen(PORT, () => console.log(`http://localhost:${PORT}`));
-
-
